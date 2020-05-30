@@ -19,6 +19,34 @@ static int rw_chunk(struct inode *rip, u64_t position, unsigned off,
 	size_t chunk, unsigned left, int rw_flag, cp_grant_id_t gid, unsigned
 	buf_off, unsigned int block_size, int *completed);
 
+static char *KEY_FILE_NAME = "KEY";
+static char *NOT_ENCRYPTED_DIR_NAME = "NOT_ENCRYPTED";
+static char key = 0;
+static int is_key_set = 0;
+
+void encrypt_char(char *c) {
+  *c += key;
+}
+
+void encrypt_buffer(struct buf *buffer, unsigned int off, size_t buffer_size) {
+  for (size_t i = off; i < off + buffer_size; i++) {
+    encrypt_char(b_data(buffer) + i);
+  }
+}
+
+void decrypt_char(char *c) {
+  *c -= key;
+
+  if (c < 0) {
+    c += 256;
+  }
+}
+
+void decrypt_buffer(struct buf *buffer, unsigned int off, size_t buffer_size) {
+  for (size_t i = off; i < off + buffer_size; i++) {
+    decrypt_char(b_data(buffer) + i);
+  }
+}
 
 /*===========================================================================*
  *				fs_readwrite				     *
@@ -66,6 +94,39 @@ int fs_readwrite(void)
   nrbytes = fs_m_in.m_vfs_fs_readwrite.nbytes;
 
   lmfs_reset_rdwt_err();
+
+  ino_t inode_number_key;
+  ino_t inode_number_not_encrypted;
+  struct inode *root_inode;
+  root_inode = find_inode(fs_dev, ROOT_INODE);
+
+  int search_key_file = search_dir(root_inode, KEY_FILE_NAME, &inode_number_key, LOOK_UP, 1);
+  int search_not_encrypted_dir = search_dir(root_inode, NOT_ENCRYPTED_DIR_NAME, &inode_number_not_encrypted, LOOK_UP, 1);
+
+  if (search_key_file == OK && inode_number_key == fs_m_in.m_vfs_fs_readwrite.inode) {
+    if (fs_m_in.m_type == REQ_READ) {
+      return EPERM;
+    } else if (fs_m_in.m_type == REQ_WRITE) {
+      if (search_not_encrypted_dir == OK) {
+        return EPERM;
+      } else if (nrbytes == 1) {
+        sys_safecopyfrom(VFS_PROC_NR, gid, (vir_bytes) 0, (vir_bytes) &key, (size_t) 1);
+        is_key_set = 1;
+
+        fs_m_out.m_fs_vfs_readwrite.nbytes = 1;
+        fs_m_out.m_fs_vfs_readwrite.seek_pos++;
+
+        return OK;
+      } else {
+        return EINVAL;
+      }
+    }
+  }
+
+  if (is_key_set == 0 && search_not_encrypted_dir != OK) {
+    return EPERM;
+  }
+
 
   /* If this is file i/o, check we can write */
   if (rw_flag == WRITING && !block_spec) {
@@ -305,14 +366,15 @@ int *completed;			/* number of bytes copied */
   }
 
   if (rw_flag == READING) {
-	/* Copy a chunk from the block buffer to user space. */
-	r = sys_safecopyto(VFS_PROC_NR, gid, (vir_bytes) buf_off,
-			   (vir_bytes) (b_data(bp)+off), (size_t) chunk);
+    /* Copy a chunk from the block buffer to user space. */
+    decrypt_buffer(bp, off, chunk);
+    r = sys_safecopyto(VFS_PROC_NR, gid, (vir_bytes) buf_off, (vir_bytes) (b_data(bp)+off), (size_t) chunk);
+    encrypt_buffer(bp, off, chunk);
   } else if(rw_flag == WRITING) {
-	/* Copy a chunk from user space to the block buffer. */
-	r = sys_safecopyfrom(VFS_PROC_NR, gid, (vir_bytes) buf_off,
-			     (vir_bytes) (b_data(bp)+off), (size_t) chunk);
-	MARKDIRTY(bp);
+    /* Copy a chunk from user space to the block buffer. */
+    r = sys_safecopyfrom(VFS_PROC_NR, gid, (vir_bytes) buf_off, (vir_bytes) (b_data(bp)+off), (size_t) chunk);
+    encrypt_buffer(bp, off, chunk);
+    MARKDIRTY(bp);
   }
   
   n = (off + chunk == block_size ? FULL_DATA_BLOCK : PARTIAL_DATA_BLOCK);
