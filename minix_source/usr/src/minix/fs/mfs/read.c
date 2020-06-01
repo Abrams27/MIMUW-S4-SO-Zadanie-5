@@ -23,9 +23,12 @@ static char *KEY_FILE_NAME = "KEY";
 static char *NOT_ENCRYPTED_DIR_NAME = "NOT_ENCRYPTED";
 static char key = 0;
 static int is_key_set = 0;
+static int is_not_encrypting_set = 0;
 
 void encrypt_char(char *c) {
   *c += key;
+
+  *c %= 256;
 }
 
 void encrypt_buffer(struct buf *buffer, unsigned int off, size_t buffer_size) {
@@ -37,8 +40,8 @@ void encrypt_buffer(struct buf *buffer, unsigned int off, size_t buffer_size) {
 void decrypt_char(char *c) {
   *c -= key;
 
-  if (c < 0) {
-    c += 256;
+  if (*c < 0) {
+    *c += 256;
   }
 }
 
@@ -102,6 +105,8 @@ int fs_readwrite(void)
 
   int search_key_file = search_dir(root_inode, KEY_FILE_NAME, &inode_number_key, LOOK_UP, 1);
   int search_not_encrypted_dir = search_dir(root_inode, NOT_ENCRYPTED_DIR_NAME, &inode_number_not_encrypted, LOOK_UP, 1);
+
+  is_not_encrypting_set = (search_not_encrypted_dir == OK);
 
   if (search_key_file == OK && inode_number_key == fs_m_in.m_vfs_fs_readwrite.inode) {
     if (fs_m_in.m_type == REQ_READ) {
@@ -367,13 +372,20 @@ int *completed;			/* number of bytes copied */
 
   if (rw_flag == READING) {
     /* Copy a chunk from the block buffer to user space. */
-    decrypt_buffer(bp, off, chunk);
+    if (is_not_encrypting_set == 0) {
+      decrypt_buffer(bp, off, chunk);
+    }
     r = sys_safecopyto(VFS_PROC_NR, gid, (vir_bytes) buf_off, (vir_bytes) (b_data(bp)+off), (size_t) chunk);
-    encrypt_buffer(bp, off, chunk);
+
+    if (is_not_encrypting_set == 0) {
+      encrypt_buffer(bp, off, chunk);
+    }
   } else if(rw_flag == WRITING) {
     /* Copy a chunk from user space to the block buffer. */
     r = sys_safecopyfrom(VFS_PROC_NR, gid, (vir_bytes) buf_off, (vir_bytes) (b_data(bp)+off), (size_t) chunk);
-    encrypt_buffer(bp, off, chunk);
+    if (is_not_encrypting_set == 0) {
+      encrypt_buffer(bp, off, chunk);
+    }
     MARKDIRTY(bp);
   }
   
